@@ -1,0 +1,42 @@
+# Leo MCP — Selector Registry
+# ==============================
+# Single source of truth for the DOM selectors used to automate Brave Leo.
+# Edit this file when Brave updates its UI — no code changes needed.
+#
+# Best practices followed:
+#   * Prefer `data-testid` / `data-test-id` (stable, language-independent).
+#   * Avoid language-dependent attributes (localized titles/aria text).
+#   * `{model_key}` is a runtime template variable resolved in code.
+
+# Schema version. Bump when the shape below changes; the loader refuses to
+# load a file it does not understand (protects against silent mis-parses).
+schema_version = 1
+
+[selectors]
+
+# Model button that opens the model-selection menu.
+model_button = 'leo-button[data-testid="anchor-button"]'
+
+# Model menu item. `{model_key}` is substituted at runtime (e.g. "chat-claude-sonnet").
+model_item = "leo-menu-item[data-key='{model_key}']"
+
+# The prompt input (contenteditable web component).
+input_field = '[data-testid="leo-input"]'
+
+# Send button (language-independent; targeted by icon, not localized title).
+send_button = '[data-testid="leo-submit-button"]'
+
+# "Show all models" entry in the model menu.
+show_all_models = 'leo-menu-item[data-testid="show-all-models-button"]'
+
+# Conversation response container (comma-separated fallback list, ordered by
+# specificity). The code applies `.last` to grab the most recent response.
+# Verified against a live Brave build: the assistant turn lives inside the
+# `chrome-untrusted://leo-ai-conversation-entries` iframe under
+# `[data-testid="assistant-turn"]`. The previous `assistant-response` /
+# `.assistant-message` / `[class*="response"]` guesses matched nothing, so the
+# DOM fallback always produced an empty extraction.
+response_selector = '[data-testid="assistant-turn"], [data-testid="assistant-response"], .assistant-message, .leo-response'
+
+# The iframe that hosts the isolated conversation entries.
+conversation_iframe = '[data-testid="conversation-entries-iframe"]'

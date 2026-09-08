@@ -1,0 +1,69 @@
+# Leo MCP — Model Registry
+# =========================
+# Maps Brave Leo model keys to human-readable display names.
+# Edit this file to add/remove models when Brave updates its lineup.
+# No code changes needed.
+#
+# Format:
+#   [models.<model_key>]
+#   name = "Display Name"
+
+[models.chat-automatic]
+name = "automatic"
+description = "Leo chooses the best model automatically"
+
+[models.chat-claude-sonnet]
+name = "claude sonnet"
+description = "Claude Sonnet — balanced performance for coding and analysis"
+
+[models.chat-claude-haiku]
+name = "claude haiku"
+description = "Claude Haiku — fastest, for quick tasks"
+
+[models.chat-claude-opus]
+name = "claude opus"
+description = "Claude Opus — maximum reasoning for planning and refactoring"
+
+[models.chat-qwen]
+name = "qwen"
+description = "Qwen — vision-capable general-purpose model"
+
+[models.chat-qwen-3-235b]
+name = "qwen 3 235b"
+description = "Qwen 3 (235B) — latest generation reasoning"
+
+[models.chat-qwen-3-coder-480b]
+name = "qwen 3 coder 480b"
+description = "Qwen 3 Coder (480B) — specialized for code generation"
+
+[models.chat-basic]
+name = "llama 3.1 8b"
+description = "Llama 3.1 8B — lightweight, fast, basic tasks"
+
+[models.chat-llama-4-scout]
+name = "llama 4 scout"
+description = "Llama 4 Scout — efficient research-oriented model"
+
+[models.chat-llama-4-maverick]
+name = "llama 4 maverick"
+description = "Llama 4 Maverick — high-capability general purpose"
+
+[models.chat-gpt-oss-20b]
+name = "gpt oss 20b"
+description = "GPT-OSS 20B — open-source GPT variant"
+
+[models.chat-gpt-oss-120b]
+name = "gpt oss 120b"
+description = "GPT-OSS 120B — large open-source GPT variant"
+
+[models.chat-mistral-large]
+name = "mistral large"
+description = "Mistral Large — strong multilingual performance"
+
+[models.chat-pixtral-large]
+name = "pixtral large"
+description = "Pixtral Large — vision + language, document understanding"
+
+[models.chat-deepseek-v3-1]
+name = "deepseek v3.1"
+description = "DeepSeek V3.1 — strong reasoning and code generation"
