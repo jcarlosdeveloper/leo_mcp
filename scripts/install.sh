@@ -2,7 +2,7 @@
 # Leo MCP Server — macOS installer
 #
 # Usage (standard pattern):
-#   curl -fsSL "https://raw.githubusercontent.com/tlalocaimx/leo_mcp/main/scripts/install.sh" | sh
+#   curl -fsSL "https://raw.githubusercontent.com/jcarlosdeveloper/leo_mcp/main/scripts/install.sh" | sh
 #
 # This installer:
 #   1. Ensures `uv` is present (bundles a standalone Python 3.12+).
@@ -16,7 +16,7 @@
 set -eu
 
 # ── Tunables ────────────────────────────────────────────────────────────────
-REPO_ARCHIVE_URL="https://github.com/tlalocaimx/leo_mcp/archive/refs/heads/main.tar.gz"
+REPO_ARCHIVE_URL="https://github.com/jcarlosdeveloper/leo_mcp/archive/refs/heads/main.tar.gz"
 PYTHON_VERSION="3.12"
 MIN_UV_VERSION="0.5.0"
 UV_INSTALL_URL="https://astral.sh/uv/install.sh"

@@ -13,8 +13,10 @@ agent's token usage: the agent plans, Leo executes.
   (the server bootstraps this automatically if not already active)
 
 ### Installation
+```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+```
 
 `requirements.txt` is a generated lock file (single source of truth is
 `pyproject.toml`). To regenerate it after changing dependencies:
@@ -24,7 +26,9 @@ uv pip compile pyproject.toml -o requirements.txt
 ```
 
 ### Run
+```bash
 python3 leo_mcp_server.py
+```
 
 On startup, the server:
 - Acquires a single-instance lock (~/.leo_mcp_server.lock)
@@ -36,6 +40,7 @@ On startup, the server:
 | Tool                     | Description                                                                          |
 |--------------------------|--------------------------------------------------------------------------------------|
 | ask_leo_skill            | Runs a skill (refactor, debug, planning) with file injection and optional disk write |
+| ask_leo_result           | Poll a background generation started by ask_leo_skill                                |
 | ask_leo_quick            | Fast web search via Brave AI                                                         |
 | ask_leo_extensive        | Deep research via Brave AI                                                           |
 | get_conversation_history | Recent conversation history                                                          |
@@ -113,8 +118,10 @@ Safety guarantees (enforced by patch_writer):
 - Action checks: modify requires an existing file; create requires a new one
 
 Example:
+```bash
 mkdir -p /tmp/leo_test && echo "def f(): return 1+1" > /tmp/leo_test/x.py
 LEO_WRITE_MODE=dry_run python3 leo_mcp_server.py
+```
 
 Recommendation: run against a git-tracked repo. The .bak file is a secondary
 safety net; git diff / git checkout is the primary recovery path.
@@ -181,8 +188,10 @@ leo_mcp/
 
 ## Tests
 
+```bash
 source .venv/bin/activate
 pytest tests/ -v
+```
 
 Coverage includes:
 - Brave Browser (headless, CDP)

@@ -11,7 +11,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "leo-mcp-server"
-version = "10.0.0"
+version = "10.3.0"
 description = "MCP Bridge Server for Brave Leo AI - CDP integration, streaming, SQLite polling"
 readme = "README.md"
 license = "MIT"
@@ -98,10 +98,10 @@ dev = [
 # leo-mcp = "leo_mcp_server:main"  # Removido - no hay función main()
 
 [project.urls]
-Homepage = "https://github.com/tu-usuario/leo-mcp"
-Repository = "https://github.com/tu-usuario/leo-mcp.git"
-Issues = "https://github.com/tu-usuario/leo-mcp/issues"
-Documentation = "https://github.com/tu-usuario/leo-mcp#readme"
+Homepage = "https://github.com/jcarlosdeveloper/leo_mcp"
+Repository = "https://github.com/jcarlosdeveloper/leo_mcp.git"
+Issues = "https://github.com/jcarlosdeveloper/leo_mcp/issues"
+Documentation = "https://github.com/jcarlosdeveloper/leo_mcp#readme"
 
 # ============================================
 # TOOLS CONFIGURATION

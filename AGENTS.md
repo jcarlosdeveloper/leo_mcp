@@ -1,4 +1,4 @@
-# AGENTS.md - Leo MCP Server v10.0
+# AGENTS.md - Leo MCP Server v10.3
 
 Coding agent instructions for Leo MCP Server.
 
@@ -41,13 +41,13 @@ python3 leo_mcp_server.py  # Start MCP server
 ### Run All Tests
 ```bash
 source .venv/bin/activate
-pytest tests/ -v  # Expected: 18/18 passed
+pytest tests/ -v
 ```
 
 ### Test Categories
-- **brave_search/**: Playwright headless tests (2 tests)
-- **leo_chat/**: CDP, skills, context building (10 tests)
-- **integration/**: MCP server, health check (6 tests)
+- **brave_search/**: Playwright headless tests
+- **leo_chat/**: CDP, skills, context building, patch writer, registry, jobs
+- **integration/**: MCP server, health check, ask_leo_skill decision matrix
 
 ### Focus on Specific Tests
 ```bash
@@ -175,21 +175,19 @@ full backward compatibility.
   legacy `MODEL_BUTTON`) and keeps the `_load_model_registry` shim
   (`_MODEL_REGISTRY_PATH`, `_model_registry_cache`) for backward compatibility.
 
-### Remaining Plan
-- [ ] **Refactor `brave_leo_page.py`** — verify final review: no orphaned `Path`
-      import, no leftover local imports of `_load_model_registry`, no circular
-      import between `selectors.py` / `model_registry.py` and the POM.
-- [ ] **Update `leo_chat/__init__.py` exports** — confirm `load_selectors`,
-      `get_selector`, `load_model_registry` in imports and `__all__`.
-- [ ] **Run tests** — verify backward compatibility:
-      1. `pytest tests/leo_chat/test_v103_features.py -q` (registry load/cache/fallback)
-      2. `pytest tests/leo_chat/test_final_model_selection.py tests/leo_chat/test_tareas_leo_chat.py -q`
-      3. Manual import smoke test (selectors, registry, POM attrs, cache/path override)
+### Status
+The refactor is complete:
+- [x] `brave_leo_page.py` consumes `selectors.py` / `model_registry.py`; the
+      legacy `_load_model_registry` name is a thin backward-compat shim wrapping
+      `load_model_registry` (no orphaned `Path` import, no circular import).
+- [x] `leo_chat/__init__.py` exports `load_selectors`, `get_selector`,
+      `load_model_registry` (plus `MODEL_REGISTRY_PATH`).
+- [x] Backward compatibility verified via
+      `tests/leo_chat/test_v103_features.py`,
+      `tests/leo_chat/test_final_model_selection.py`, and
+      `tests/leo_chat/test_tareas_leo_chat.py`.
 
 ### Known Caveats
-- **pytest-asyncio missing**: async tests fail with "async def functions are not
-  natively supported". Pre-existing environment issue — run
-  `pip install pytest-asyncio` to unblock the full 18/18 target.
 - **Stale assertion**: `tests/leo_chat/test_tareas_leo_chat.py:91` expects
   `MODEL_BUTTON` to contain `leo-button[slot='anchor-content']`; the actual
   selector is `data-testid="anchor-button"`. Pre-existing, not caused by this refactor.
@@ -223,7 +221,7 @@ python3 leo_mcp_server.py 2>&1 | grep -E "✅|❌"
 ```
 
 ### Commit Checklist
-- [ ] Tests pass (18/18)
+- [ ] Tests pass
 - [ ] No hardcoded prompts (use dynamic rotation)
 - [ ] English only (comments, docstrings, messages)
 - [ ] Health check passes
@@ -351,6 +349,6 @@ python3.12 -m venv .venv  # Use Python 3.12+
 
 ---
 
-**Last updated**: 2026-09-06  
-**Version**: 10.0  
+**Last updated**: 2026-09-08  
+**Version**: 10.3  
 **Author**: Juan Carlos Duarte

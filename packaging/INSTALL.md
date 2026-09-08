@@ -3,7 +3,7 @@
 One-line install (standard `curl | sh` pattern):
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/tlalocaimx/leo_mcp/main/scripts/install.sh" | sh
+curl -fsSL "https://raw.githubusercontent.com/jcarlosdeveloper/leo_mcp/main/scripts/install.sh" | sh
 ```
 
 > The `curl | sh` pattern runs a remote script. Review it first if you prefer:
