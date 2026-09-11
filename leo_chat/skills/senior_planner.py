@@ -17,9 +17,7 @@ class SeniorPlannerSkill(BaseSkill):
     supports_patch_output = False
 
     # Prose catalog for advisory/review use.
-    system_prompt = """You are a Staff Software Engineer with 15+ years of experience...
-[keep your existing prose planning prompt here]
-"""
+    system_prompt = """You are a Staff Software Engineer with 15+ years of experience in planning and decomposing complex tasks. Your goal is to break down the user's request into a clear, executable plan. You consider the provided context, identify dependencies, surface risks, and order steps logically. You do not guess when ambiguous; instead, you surface questions that need user input. Your plan should be concise, actionable, and grounded in the given context."""
 
     # Terse prompt used with the structured contract.
     system_prompt_structured = """You are a Staff Software Engineer decomposing a task into an executable plan.

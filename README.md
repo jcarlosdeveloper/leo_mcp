@@ -37,13 +37,15 @@ On startup, the server:
 
 ## Available Tools
 
-| Tool                     | Description                                                                          |
-|--------------------------|--------------------------------------------------------------------------------------|
-| ask_leo_skill            | Runs a skill (refactor, debug, planning) with file injection and optional disk write |
-| ask_leo_result           | Poll a background generation started by ask_leo_skill                                |
-| ask_leo_quick            | Fast web search via Brave AI                                                         |
-| ask_leo_extensive        | Deep research via Brave AI                                                           |
-| get_conversation_history | Recent conversation history                                                          |
+| Tool                     | Description                                                                                         | Key Args                                                              | Returns                                                                                  |
+|--------------------------|-----------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------|
+| ask_leo_skill            | Runs a skill (code_refiner, code_editor, senior_planner) with file injection; writes to disk by default | `skill_name`, `prompt`, `filepaths`, `conversation_uuid`          | JSON `{status, skill_used, content, conversation_uuid}` (patch mode: summary)            |
+| ask_leo_result           | Polls a background generation started by ask_leo_skill                                              | `job_id`                                                              | `{status, content, conversation_uuid}`                                                    |
+| ask_leo_quick            | Fast single-turn web search via Brave AI (headless Chromium)                                        | `prompt`                                                              | JSON `{status, content}`                                                                  |
+| ask_leo_extensive        | Deep multi-turn research via Brave AI (headless Chromium)                                           | `prompt`                                                              | JSON `{status, content}`                                                                  |
+| get_conversation_history | Returns recent Leo conversation turns from the local SQLite DB                                      | `limit`                                                               | JSON array `[{ts, skill, uuid, prompt_preview}]`                                          |
+| leo_next_instruction     | Returns the single next atomic action (create / replace / run / done) for a locked target file. Turn 1 injects the file once to open the session; every later turn resumes the same conversation_uuid with only the raw result of the last action — no file re-injection. Loop until action == "done"   | `target_file`, `goal`, `conversation_uuid`, `last_result`             | `{action, verify, conversation_uuid}`                                                     |
+| leo_apply_edit           | Applies a minimal str_replace edit to a file via the code_editor skill                              | `target_file`, `find`, `replace`, `conversation_uuid`                 | JSON `{status, mode, file, action, risk, summary, bytes, conversation_uuid}`              |
 
 ### ask_leo_skill Skills
 
@@ -170,21 +172,23 @@ inputs) also helps prevent the stall.
 
 ## Structure
 
+```
 leo_mcp/
-├── leo_mcp_server.py      # MCP server + tool definitions
-├── leo_chat/              # CDP module
-│   ├── config.py          # Write-mode resolution (LEO_WRITE_MODE)
-│   ├── execution.py       # Unified Leo flow (structured + streaming)
-│   ├── patch_writer.py    # Single-file disk writes (validation, atomicity)
-│   ├── pages/             # Brave Leo Page Object
-│   ├── context/           # Prompt building
-│   ├── db/                # SQLite + streaming
-│   └── skills/            # Skill factory + skill_support
-├── brave_search/          # Brave Search module
-└── tests/                 # Tests (separate from production)
+├── leo_mcp_server.py   # MCP server + tool definitions
+├── leo_chat/           # CDP module
+│   ├── config.py       # Write-mode resolution (LEO_WRITE_MODE)
+│   ├── execution.py    # Unified Leo flow (structured + streaming)
+│   ├── patch_writer.py # Single-file disk writes (validation, atomicity)
+│   ├── pages/          # Brave Leo Page Object
+│   ├── context/        # Prompt building
+│   ├── db/             # SQLite + streaming
+│   └── skills/         # Skill factory + skill_support
+├── brave_search/       # Brave Search module
+└── tests/              # Tests (separate from production)
     ├── brave_search/
-    ├── leo_chat/          # includes test_patch_writer.py
-    └── integration/       # includes ask_leo_skill decision matrix
+    ├── leo_chat/       # includes test_patch_writer.py
+    └── integration/    # includes ask_leo_skill decision matrix
+```
 
 ## Tests
 
@@ -220,7 +224,7 @@ Fast verification without calling Leo (levels 1-5):
 
 - Visible failure over invisible magic: explicit bootstrap and validation
 - User takes action over auto-repair: clear errors with resolution steps
-- Opt-in destructive operations: disk writes are off by default, per-skill gated
+- Explicit destructive operations: disk writes are ON by default, per-skill gated (set LEO_WRITE_MODE=disabled to opt out)
 - Data over instructions: injected content is never treated as commands
 
 ---

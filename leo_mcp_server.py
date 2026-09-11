@@ -20,6 +20,7 @@ import atexit
 import fcntl
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -890,6 +891,198 @@ async def get_conversation_history(limit: int = 20) -> str:
         return json.dumps({
             "error": str(execution_error)
         }, ensure_ascii=False)
+
+
+# ── Executor Façade: single-file autonomous lifecycle over ONE UUID ──────────
+# Light local model = EXECUTOR. Leo = BRAIN. One file, one conversation_uuid,
+# one atomic action per turn. Reuses the engine untouched.
+
+
+# Leo-facing contract: a legitimate task + strict output format.
+# NOTE: this is NOT a persona. It never says "you are directing an executor",
+# never says "you cannot reason", and never references another model. Those
+# executor operating rules live ONLY in the client-side executor system prompt.
+_LEO_STEP_CONTRACT = """\
+Your task: determine the single next step required to accomplish the goal for \
+the target file, and return it in the exact format below.
+
+Return one fenced ```json block containing exactly one step object, then \
+<<<LEO_DONE>>> on its own line. Do not add commentary before or after the block.
+
+The step object must be exactly one of:
+  {"action":"create","path":"<abs>","content":"<full literal file contents>"}
+  {"action":"replace","path":"<abs>","find":"<exact literal>","replace":"<exact literal>"}
+  {"action":"run","command":"<single shell command>"}
+  {"action":"done","summary":"<one sentence>"}
+
+Every non-done step must also include:
+  "verify":"<one shell command; exit code 0 means success>"
+  "why":"<one short sentence>"
+
+Requirements:
+- The step concerns only the target file. Do not reference other files.
+- content/find/replace must be complete and literal: no placeholders, no
+  ellipses, no "rest unchanged".
+- Return exactly one step for this turn, never a multi-step list.
+- If the goal is already met, return the "done" step.
+"""
+
+
+def _build_executor_session_prompt(goal: str, target_file: str) -> str:
+    """Turn-1 request TO Leo: file is scoped, goal stated, format requested.
+
+    Framed as a first-person request from the caller, so Leo treats it as a
+    legitimate task, not as instructions embedded in pasted material.
+    """
+    return (
+        f"I need the single next step to work on one file.\n\n"
+        f"Target file (the only file in scope): {target_file}\n"
+        f"Goal: {goal}\n\n"
+        f"{_LEO_STEP_CONTRACT}"
+    )
+
+
+def _build_executor_turn_prompt(last_result: str, cap: int = 4000) -> str:
+    """Resume-turn request: the raw result of the previous step, capped.
+
+    The cap keeps the billed executor context and Leo's growing conversation
+    small; the tail is preserved because errors live there.
+    """
+    if len(last_result) > cap:
+        head = last_result[: cap // 2]
+        tail = last_result[-cap // 2 :]
+        last_result = f"{head}\n\n[... output truncated ...]\n\n{tail}"
+    return (
+        f"Here is the result of the previous step "
+        f"(stdout + stderr + verify exit status):\n\n{last_result}\n\n"
+        f"Return the next single step in the same format, or the \"done\" "
+        f"step if the goal is met."
+    )
+
+
+async def _poll_until_done(job_id: str, timeout: float = 300.0) -> Dict[str, Any]:
+    """Absorb ask_leo_result polling so the executor never sees a job_id."""
+    deadline = time.monotonic() + timeout
+    delay = 1.5
+    while time.monotonic() < deadline:
+        res = json.loads(await ask_leo_result(job_id))
+        if res.get("status") in ("success", "error"):
+            return res
+        await asyncio.sleep(delay)
+        delay = min(delay * 1.3, 6.0)
+    return {"status": "error", "error": "Leo timed out; call again to resume."}
+
+
+def _extract_single_action(planner_content: str) -> Dict[str, Any]:
+    """Parse Leo's fenced JSON single-action block; tolerant of stray prose."""
+    if not planner_content:
+        return {"action": "error", "error": "empty planner response"}
+    m = re.search(r"```json\s*(\{.*?\})\s*```", planner_content, re.DOTALL)
+    if not m:
+        m = re.search(r"(\{.*\})", planner_content, re.DOTALL)
+    if not m:
+        return {"action": "error", "error": "no JSON action found",
+                "raw": planner_content[:300]}
+    try:
+        return json.loads(m.group(1))
+    except json.JSONDecodeError as e:
+        return {"action": "error", "error": f"bad JSON: {e}", "raw": m.group(1)[:300]}
+
+
+@mcp.tool()
+async def leo_next_instruction(
+    target_file: str,
+    goal: str,
+    conversation_uuid: str = "",
+    last_result: str = "",
+) -> str:
+    """Get the SINGLE next atomic action for the locked target file.
+
+    You are an EXECUTOR. Do not plan. Call this, perform the ONE returned
+    action verbatim, then call again with the raw result. Loop until
+    action == "done".
+
+    TURN 1: conversation_uuid="" — the file is injected once; a uuid is returned.
+    TURN 2+: pass back the SAME conversation_uuid plus last_result (raw
+        stdout+stderr). Never re-send the file. Never change the uuid.
+
+    Returns JSON: {"action":..., "verify":..., "conversation_uuid":"<reuse>"}.
+    action "done" ends the session; action "error"/"wait" → show and stop/retry.
+    """
+    _log_json("INFO", "leo_next_instruction", uuid=conversation_uuid[:8], first=not conversation_uuid)
+    is_first = not conversation_uuid
+
+    if is_first:
+        prompt = _build_executor_session_prompt(goal, target_file)
+        files = [target_file]          # inject ONCE
+    else:
+        prompt = _build_executor_turn_prompt(last_result)
+        files = []                     # resume UUID; never re-inject
+
+    raw = json.loads(await ask_leo_skill(
+        skill_name="senior_planner",
+        prompt=prompt,
+        filepaths=files,
+        conversation_uuid=conversation_uuid,
+    ))
+
+    # Turn 1 returns a background job → absorb polling to recover the UUID.
+    if raw.get("status") == "working":
+        raw = await _poll_until_done(raw["job_id"])
+    elif raw.get("status") == "busy":
+        return json.dumps({"action": "wait",
+                           "message": "Leo busy; retry shortly.",
+                           "conversation_uuid": conversation_uuid}, ensure_ascii=False)
+
+    if raw.get("status") == "still_working":
+        return json.dumps({"action": "wait",
+                           "message": "Leo still generating; call again with this uuid.",
+                           "conversation_uuid": raw.get("conversation_uuid", conversation_uuid)},
+                          ensure_ascii=False)
+
+    if raw.get("status") == "error":
+        return json.dumps({"action": "error",
+                           "error": raw.get("error", "unknown"),
+                           "conversation_uuid": conversation_uuid}, ensure_ascii=False)
+
+    resolved_uuid = raw.get("conversation_uuid", "") or conversation_uuid
+    action = _extract_single_action(raw.get("content", ""))
+    action["conversation_uuid"] = resolved_uuid    # executor MUST reuse this
+    return json.dumps(action, ensure_ascii=False)
+
+
+@mcp.tool()
+async def leo_apply_edit(
+    target_file: str,
+    find: str,
+    replace: str,
+    conversation_uuid: str = "",
+) -> str:
+    """Apply ONE literal find/replace to the locked target file (writes to disk).
+
+    Mechanical, no reasoning. Wraps code_editor (str_replace). Synchronous.
+    Reuse the SAME conversation_uuid so the edit shares Leo's memory with the
+    reasoning turns.
+
+    Returns JSON: the code_editor summary plus conversation_uuid to reuse.
+    """
+    _log_json("INFO", "leo_apply_edit", file=target_file, uuid=conversation_uuid[:8])
+    prompt = (
+        f"Apply exactly one str_replace edit to the file.\n"
+        f"FIND (exact literal):\n{find}\n\n"
+        f"REPLACE WITH (exact literal):\n{replace}\n"
+    )
+    raw = await ask_leo_skill(
+        skill_name="code_editor",
+        prompt=prompt,
+        filepaths=[target_file],
+        conversation_uuid=conversation_uuid,
+    )
+    result = json.loads(raw)
+    # code_editor is synchronous; surface its uuid for reuse next turn.
+    if "conversation_uuid" not in result:
+        result["conversation_uuid"] = conversation_uuid
+    return json.dumps(result, ensure_ascii=False)
 
 
 if __name__ == "__main__":

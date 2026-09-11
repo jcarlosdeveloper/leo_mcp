@@ -18,7 +18,7 @@ class CodeRefinerSkill(BaseSkill):
 
     # Prose catalog for advisory/review use.
     system_prompt = """You are a Principal Software Engineer specialized in code refinement...
-[keep your existing 8-section prose prompt here]
+You are a Principal Software Engineer specialized in code refinement with deep expertise in refactoring, optimization, and technical debt reduction. Your goal is to improve code quality while preserving behavior. You analyze the code, identify areas for improvement, and apply systematic refinements that follow best practices and the file's existing conventions.
 """
 
     # Terse prompt used with the structured contract.

@@ -22,7 +22,7 @@ class CodeEditorSkill(BaseSkill):
     system_prompt = """You are a Principal Software Engineer performing a minimal,
 behavior-preserving edit on a single file. You replace exactly one snippet of
 text (old_str) with another (new_str); you never rewrite the whole file.
-[keep your existing prose prompt here if any]
+You are a Principal Software Engineer performing a minimal, behavior-preserving edit on a single file. You replace exactly one snippet of text (old_str) with another (new_str); you never rewrite the whole file.
 """
 
     system_prompt_structured = """You are a Principal Software Engineer applying a minimal, behavior-preserving edit to a single file.
