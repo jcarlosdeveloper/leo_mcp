@@ -947,12 +947,46 @@ def _build_executor_turn_prompt(last_result: str, cap: int = 4000) -> str:
 
     The cap keeps the billed executor context and Leo's growing conversation
     small; the tail is preserved because errors live there.
+
+    When the result contains a verify failure signal, a prefix is prepended
+    that matches the systematic-debugging skill's description: trigger in
+    Hermes, so the skill auto-loads into the session on the next turn.
     """
+    # ── Failure detection ────────────────────────────────────────────────────
+    # Check the raw last_result BEFORE truncation so the tail (where errors
+    # live) is always included in the scan even if the head is cut.
+    _result_lower = last_result.lower()
+    _failed = any([
+        "exit 1"          in last_result,    # shell exit code
+        "exit code: 1"    in _result_lower,  # some runners format it this way
+        "verify_fail"     in _result_lower,  # explicit sentinel from executor
+        "error:"          in _result_lower,  # Python/compiler errors
+        "traceback"       in _result_lower,  # Python exceptions
+        "nameerror"       in _result_lower,  # common Python runtime errors
+        "syntaxerror"     in _result_lower,
+        "assertionerror"  in _result_lower,
+        "failed"          in _result_lower,  # test runner output
+        "no such file"    in _result_lower,  # filesystem errors
+    ])
+
+    # ── Truncation (unchanged logic) ─────────────────────────────────────────
     if len(last_result) > cap:
         head = last_result[: cap // 2]
         tail = last_result[-cap // 2 :]
         last_result = f"{head}\n\n[... output truncated ...]\n\n{tail}"
+
+    # ── Failure prefix ───────────────────────────────────────────────────────
+    # The phrase "systematic debugging required" matches the description:
+    # trigger in the systematic-debugging Superpowers skill so Hermes
+    # auto-loads it into the session. Only prepended on actual failures —
+    # never on a clean verify — so the skill does not fire spuriously.
+    _prefix = (
+        "VERIFY FAILED — systematic debugging required.\n\n"
+        if _failed else ""
+    )
+
     return (
+        f"{_prefix}"
         f"Here is the result of the previous step "
         f"(stdout + stderr + verify exit status):\n\n{last_result}\n\n"
         f"Return the next single step in the same format, or the \"done\" "
