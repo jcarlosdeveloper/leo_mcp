@@ -694,6 +694,7 @@ def stream_response(
     poll_interval: float = 1.5,
     chunk_callback: Optional[Callable[[str], None]] = None,  # compat alias
     after_rowid: int = -1,
+    required_sentinel: Optional[str] = None,
 ) -> str:
     """
     Stream a response by polling SQLite — emits chunks in near real time.
@@ -714,9 +715,15 @@ def stream_response(
             prevents returning a STALE earlier turn (a multi-turn delivery's
             "hold" acknowledgement) instead of the freshly generated answer.
             Default -1 = any entry.
+        required_sentinel: Optional terminal marker (e.g. "<<<LEO_DONE>>>") that
+            the stabilized text MUST contain before it is returned as complete.
+            When set, a stabilized snapshot missing it continues polling — this
+            mirrors ``wait_for_completion`` for structured skills and prevents a
+            premature "complete" that would spuriously trigger auto-continue.
 
     Returns:
-        The full response text once generation stabilizes (or on timeout).
+        The full response text once generation stabilizes AND contains the
+        required sentinel (if provided), or on timeout.
     """
     cb = callback or chunk_callback
     if cb is None:
@@ -739,8 +746,15 @@ def stream_response(
         else:
             stable_count += 1
 
-        # Considered done after N stable polls (and non-empty text)
+        # Considered done after N stable polls (and non-empty text), AND — when
+        # a sentinel is required — only once the sentinel is actually present.
         if stable_count >= stable_needed and current:
+            if required_sentinel and not _contains_sentinel(current, required_sentinel):
+                # Stabilized but marker missing: Brave may commit the body before
+                # the terminal marker tail. Reset the streak and keep polling.
+                stable_count = 0
+                time.sleep(poll_interval)
+                continue
             return current
 
         time.sleep(poll_interval)

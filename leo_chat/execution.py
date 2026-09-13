@@ -19,6 +19,8 @@ from leo_chat.skills.skill_factory import SkillFactory
 from leo_chat.context.prompt_builder import assemble_context
 from leo_chat.pages.brave_leo_page import BraveLeoPage
 from leo_chat.patch_writer import (
+    response_has_terminal_token,
+    strip_terminal_token,
     patch_response_complete,
     edit_response_complete,
     PATCH_END,
@@ -552,6 +554,7 @@ async def execute_leo_flow(
                 timeout=response_timeout,
                 poll_interval=1.5,
                 after_rowid=expected_min_rowid,
+                required_sentinel=_structured_sentinel(skill),
             )
             _phase_start("leo_flow_phase", _t0, phase="generation_done_stream",
                          resp_len=len(response_text or ""))
@@ -585,6 +588,7 @@ async def execute_leo_flow(
                     timeout=response_timeout,
                     poll_interval=1.5,
                     after_rowid=expected_min_rowid,
+                    required_sentinel=_structured_sentinel(skill),
                 )
             else:
                 response_text = await leo_page.wait_for_response(
@@ -654,7 +658,7 @@ async def execute_leo_flow(
             def _plan_incomplete(text: str) -> bool:
                 if not text:
                     return True
-                if TERMINAL_TOKEN in text:
+                if response_has_terminal_token(text):
                     return False
                 return True
 
@@ -915,6 +919,13 @@ async def _auto_continue_if_truncated(
             else:
                 cont_stripped = continuation.strip()
 
+                # Strip terminal token from continuation BEFORE stitching so it
+                # doesn't get buried in the middle of the combined text (which
+                # would cause _plan_incomplete to wrongly detect completion).
+                # Remember if it had the token so we can re-append it after stitching.
+                cont_had_token = response_has_terminal_token(cont_stripped)
+                cont_stripped = strip_terminal_token(cont_stripped)
+
                 # Continuation already present means Leo re-sent a finished response.
                 if cont_stripped in response_text:
                     logger.warning(
@@ -934,6 +945,12 @@ async def _auto_continue_if_truncated(
                     )
                     break
                 response_text = response_text.rstrip() + "\n" + overlap.lstrip()
+
+                # Re-append terminal token if the continuation had it — this
+                # ensures the combined text ends with the token so the next
+                # is_truncated check correctly detects completion.
+                if cont_had_token:
+                    response_text = response_text.rstrip() + "\n" + TERMINAL_TOKEN
 
             logger.debug(
                 f"   ✅ Continuation received: +{len(overlap)} chars "
@@ -1048,6 +1065,7 @@ async def _poll_sqlite_for_response_streaming(
     timeout: int = 120,
     poll_interval: float = 1.5,
     after_rowid: int = -1,
+    required_sentinel: Optional[str] = None,
 ) -> str:
     """Poll SQLite for a streamed response, falling back to DOM polling.
 
@@ -1059,8 +1077,14 @@ async def _poll_sqlite_for_response_streaming(
     consecutive turns) would return the first "hold" acknowledgement instead of
     the real answer.
 
-    Polls by UUID until the response stabilises or timeout is reached.
-    Falls back to DOM polling when no UUID is available.
+    `required_sentinel` (e.g. "<<<LEO_DONE>>>") is threaded to the streamed
+    poller so a structured skill's response is not declared complete until its
+    terminal marker is present — preventing a premature "complete" that would
+    spuriously trigger auto-continue downstream.
+
+    Polls by UUID until the response stabilises (and, when required, contains
+    the sentinel) or timeout is reached. Falls back to DOM polling when no UUID
+    is available.
     """
     from leo_chat.db.leo_read import stream_response
 
@@ -1085,6 +1109,7 @@ async def _poll_sqlite_for_response_streaming(
                 timeout=timeout,
                 poll_interval=poll_interval,
                 after_rowid=after_rowid,
+                required_sentinel=required_sentinel,
             ),
         )
 
