@@ -17,6 +17,7 @@ Tools:
 import asyncio
 import errno
 import atexit
+import datetime as _dt
 import fcntl
 import json
 import os
@@ -351,11 +352,15 @@ async def ask_leo_skill(
     conversation_uuid: str = "",
     structured_plan: bool = False,
 ) -> str:
-    """Execute a Leo skill with optional file context, structured output, and
-    optional single-file write-to-disk.
+    """Execute a Leo skill over files YOU MUST NOT READ FIRST.
 
-    Files are read and injected by this server; the calling model must never
-    read or paste file contents itself, it passes absolute paths in filepaths.
+    DO NOT read, open, cat, or view the target file before calling this tool.
+    DO NOT paste file contents into `prompt`. This server reads and injects the
+    file itself from `filepaths`. Reading it first duplicates it into your
+    context and wastes the tokens this tool exists to save. You do NOT need the
+    file contents to call this tool; the absolute path is sufficient. A prompt
+    that appears to contain pasted source is rejected with status "error" before
+    any round-trip.
 
     HARD REQUIREMENT (write-patch skills, e.g. code_refiner, code_editor):
     code_refiner (whole-file) and code_editor (str_replace edit) write to disk
@@ -414,6 +419,34 @@ async def ask_leo_skill(
         - "error": status, error, skill.
     """
     _log_json("INFO", "ask_leo_skill_start", skill=skill_name, prompt=prompt[:60], files=len(filepaths))
+
+    _paste_reason = _looks_like_pasted_file(prompt, filepaths)
+    if _paste_reason:
+        _log_json(
+            "WARN",
+            "ask_leo_skill_rejected_paste",
+            skill=skill_name,
+            prompt_len=len(prompt),
+            had_filepaths=bool(filepaths),
+        )
+        _metrics_log(
+            skill=skill_name,
+            prompt_len=len(prompt),
+            duration_ms=0,
+            status="rejected_paste",
+        )
+        return json.dumps(
+            {
+                "status": "error",
+                "error": _paste_reason,
+                "skill": skill_name,
+                "fix": {
+                    "prompt": "<short task description only>",
+                    "filepaths": ["<absolute path to the file>"],
+                },
+            },
+            ensure_ascii=False,
+        )
 
     # Disk write is the narrowest condition: global flag + patch skill + files.
     should_write = (
@@ -560,13 +593,6 @@ async def ask_leo_skill(
         _log_json("INFO", "ask_leo_skill_cache_hit", skill=skill_name)
         return cached
 
-    # Detect the read-then-paste anti-pattern: long prompt with no filepaths.
-    if len(prompt) > 5000 and not filepaths:
-        _log_json(
-            "WARN", "ask_leo_skill_large_prompt_no_filepaths",
-            prompt_len=len(prompt),
-            hint="Possible file content pasted into prompt; use 'filepaths' instead.",
-        )
 
     # Enable streaming for long-form skills, complex prompts, or structured out.
     auto_stream = _auto_detect_stream(skill_name, prompt, filepaths)
@@ -893,6 +919,330 @@ async def get_conversation_history(limit: int = 20) -> str:
         }, ensure_ascii=False)
 
 
+# ── leo_new_project: bootstrap a new project from a vague prompt ─────────────
+# Pure consumer of senior_planner's plan_v1 contract. Writes two artifacts to
+# project_path/: AGENTS.md (the ONLY file Hermes auto-loads — kept minimal) and
+# KANBAN.init.md (a pure manifest read by leo_decompose_plan). Never creates
+# kanban cards, never runs setup.sh, never touches profiles or SOUL.md.
+
+# MINIMAL AGENTS.md static core. Hardcoded; never generated, never padded.
+_AGENTS_STATIC = """\
+## Worker Contract
+kanban_show() first; cd $HERMES_KANBAN_WORKSPACE; kanban_heartbeat() on long ops;
+finish with kanban_complete or kanban_block. Implementers route completion through
+kanban_request_review, never kanban_complete directly.
+
+## Blocked Card Protocol
+kanban_block(reason="<kind>: <one line>") where kind is one of:
+needs_input | needs_decision | dependency | capability | transient.
+
+## TDD Protocol (senior-coder, at implementation time)
+RED: write the acceptance test first, confirm it fails. GREEN: minimum code to pass.
+REFACTOR: clean up; full suite still passes.
+"""
+
+_RISK_TO_PRIORITY = {"HIGH": 5, "MEDIUM": 4, "LOW": 3}
+
+
+def _iso_now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _date_slug() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+
+
+def _local_id(step_id: int) -> str:
+    return f"task-{int(step_id)}"
+
+
+def _build_factcheck_prompt(prompt: str) -> str:
+    return (
+        "Fact-check ONLY the external technical claims in this request. For each "
+        "named library, framework, API, service, or version, confirm it exists in "
+        "2026 and note compatibility/deprecation risk. Do NOT plan the "
+        f"implementation. Concise findings only.\n\nRequest:\n{prompt}"
+    )
+
+
+def _build_planner_prompt(prompt: str, factcheck: str) -> str:
+    # No JSON shape here — STRUCTURED_DIRECTIVE in the skill already pins plan_v1.
+    return (
+        f"Goal:\n{prompt}\n\n"
+        f"Verified external facts (web search):\n{factcheck}\n\n"
+        "Prefer one target file per step. If underspecified, populate "
+        "needs_user_decision rather than guessing."
+    )
+
+
+def _extract_plan_json(content: str) -> Dict[str, Any]:
+    if not content:
+        return {}
+    m = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL) \
+        or re.search(r"(\{.*\})", content, re.DOTALL)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _plan_is_actionable(plan_v1: Dict[str, Any]) -> bool:
+    """Actionable iff steps present AND no blocking user decisions."""
+    return bool(plan_v1.get("steps")) and not plan_v1.get("needs_user_decision")
+
+
+def _map_plan_v1_to_kanban(
+    plan_v1: Dict[str, Any], board_slug: str, tenant: str, workspace: str,
+) -> Dict[str, Any]:
+    """Pure mapper (no LLM). Drops dangling depends_on edges, keeps the task."""
+    step_ids = {s.get("id") for s in plan_v1.get("steps", [])}
+    warnings: List[str] = []
+    tasks = []
+
+    for step in plan_v1.get("steps", []):
+        sid = step.get("id")
+        deps = step.get("depends_on", []) or []
+        resolved, dangling = [], []
+        for d in deps:
+            (resolved if d in step_ids else dangling).append(d)
+        if dangling:
+            warnings.append(
+                f"step {sid}: dropped unresolvable depends_on {dangling} "
+                f"(no matching step id); parent edge omitted"
+            )
+        targets = step.get("targets") or []
+        # A step may legitimately have ZERO or MULTIPLE targets. Preserve all of
+        # them in `targets` (the manifest lists them verbatim); the title only
+        # needs a human label, so list every target — never silently drop any.
+        if targets:
+            title = f"Implement {', '.join(str(t) for t in targets)}"
+        else:
+            title = step.get("description", "")[:72]
+        tasks.append({
+            "local_id": _local_id(sid),
+            "title": title,
+            "assignee": "senior-coder",
+            "priority": _RISK_TO_PRIORITY.get(str(step.get("risk", "")).upper(), 4),
+            "workspace": workspace,
+            "parents": [_local_id(d) for d in resolved],
+            "spec": step.get("description", ""),
+            "targets": targets,
+            "acceptance": [step["done_when"]] if step.get("done_when") else [],
+            "risk": step.get("risk", ""),
+        })
+
+    return {
+        "board_slug": board_slug,
+        "tenant": tenant,
+        "workspace_default": workspace,
+        "idempotency_prefix": f"{board_slug}-{_date_slug()}",
+        "goal": plan_v1.get("goal", ""),
+        "assumptions": plan_v1.get("assumptions", []),
+        "plan_risks": plan_v1.get("risks", []),
+        "tasks": tasks,
+        "warnings": warnings,
+    }
+
+
+def _render_agents_md(km: Dict[str, Any], factcheck: str) -> str:
+    """Minimal AGENTS.md — the ONLY file Hermes auto-loads (docs-verified)."""
+    decided = "\n".join(f"- {a}" for a in km.get("assumptions", [])) or "- (none yet)"
+    risks = "\n".join(
+        f"- {r.get('risk', '')} → {r.get('mitigation', '')}"
+        for r in km.get("plan_risks", [])
+    ) or "- (none)"
+    return (
+        f"# AGENTS.md\n\n"
+        f"## Goal\n{km.get('goal', '')}\n\n"
+        f"## Decided (shared across all cards — do not re-decide)\n{decided}\n\n"
+        f"## Verified External Facts\n{factcheck.strip()}\n\n"
+        f"## Risks\n{risks}\n\n"
+        f"{_AGENTS_STATIC}"
+    )
+
+
+def _render_kanban_init_md(km: Dict[str, Any]) -> str:
+    lines = [
+        "# KANBAN.init.md",
+        "<!-- Input manifest for leo_decompose_plan. Do not rename ## headers. -->",
+        "",
+        f"- board_slug: {km['board_slug']}",
+        f"- tenant: {km['tenant']}",
+        f"- workspace_default: {km['workspace_default']}",
+        f"- idempotency_prefix: {km['idempotency_prefix']}",
+        "",
+        "## Goal",
+        km.get("goal", ""),
+        "",
+        "## Tasks",
+    ]
+    for t in km.get("tasks", []):
+        parents = ", ".join(t["parents"]) or "(none)"
+        acceptance = "; ".join(t["acceptance"]) or "(none)"
+        lines += [
+            f"### {t['local_id']} — {t['title']}",
+            f"- assignee: {t['assignee']}",
+            f"- priority: {t['priority']}",
+            f"- workspace: {t['workspace']}",
+            f"- parents: {parents}",
+            f"- targets: {', '.join(t['targets']) or '(none)'}",
+            f"- risk: {t['risk'] or '(none)'}",
+            f"- acceptance: {acceptance}",
+            "",
+            f"{t['spec']}",
+            "",
+        ]
+    warnings = km.get("warnings", [])
+    if warnings:
+        lines += ["## Open Questions / Warnings"]
+        lines += [f"- {w}" for w in warnings]
+        lines.append("")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def leo_new_project(
+    prompt: str,
+    project_path: str,
+    board_slug: str,
+    tenant: str = "default",
+    workdir: str = "",
+    max_factcheck: bool = True,
+) -> str:
+    """Bootstrap a new project from a vague prompt.
+
+    Writes AGENTS.md (minimal, auto-loaded by Hermes) and KANBAN.init.md (a
+    manifest consumed by leo_decompose_plan) to project_path/. Never creates
+    kanban cards or configures profiles.
+
+    Args:
+        prompt: Vague natural-language project description.
+        project_path: Absolute dir for the two artifacts (created if missing).
+        board_slug: Stamped into KANBAN.init.md; leo_decompose_plan reads it.
+        tenant: Kanban tenant namespace (default "default").
+        workdir: Absolute path for dir:<path> workspaces; "" → scratch.
+        max_factcheck: Run ask_leo_extensive external fact-check (default True).
+
+    Returns:
+        JSON: {status, project_path, artifacts, board_slug, warnings,
+               needs_user_decision, goal, task_count}.
+    """
+    _log_json("INFO", "leo_new_project_start", board=board_slug, tenant=tenant)
+    warnings: List[str] = []
+    workspace = f"dir:{workdir}" if workdir else "scratch"
+
+    # ── Optional external fact-check (best-effort; never blocks planning) ────
+    factcheck = ""
+    if max_factcheck:
+        try:
+            raw_ext = await ask_leo_extensive(_build_factcheck_prompt(prompt))
+            outer = json.loads(raw_ext)              # outer {status, content}
+            if outer.get("status") == "success":
+                inner = json.loads(outer.get("content", "{}"))  # content is JSON str
+                if isinstance(inner, dict):
+                    factcheck = json.dumps(inner, ensure_ascii=False)
+                elif inner:
+                    factcheck = str(inner)
+        except Exception as exc:
+            _log_json("WARN", "leo_new_project_factcheck_degraded", error=str(exc))
+            warnings.append(f"fact-check failed ({exc}); proceeded without it")
+        if not factcheck:
+            warnings.append("fact-check returned no usable findings")
+
+    # ── Plan via senior_planner (backgrounded; poll to completion) ───────────
+    raw_plan = json.loads(await ask_leo_skill(
+        skill_name="senior_planner",
+        prompt=_build_planner_prompt(prompt, factcheck),
+        filepaths=[],
+        structured_plan=True,
+    ))
+
+    if raw_plan.get("status") == "working":
+        raw_plan = await _poll_until_done(raw_plan["job_id"])
+    elif raw_plan.get("status") == "busy":
+        return json.dumps({
+            "status": "busy", "message": "Leo busy; retry shortly.",
+        }, ensure_ascii=False)
+    elif raw_plan.get("status") == "still_working":
+        return json.dumps({
+            "status": "still_working",
+            "conversation_uuid": raw_plan.get("conversation_uuid", ""),
+            "message": "Leo still generating; call again with this uuid.",
+        }, ensure_ascii=False)
+
+    if raw_plan.get("status") == "error":
+        return json.dumps({
+            "status": "error", "error": raw_plan.get("error", "planner error"),
+        }, ensure_ascii=False)
+
+    plan_v1 = _extract_plan_json(raw_plan.get("content", ""))
+
+    # ── Schema gate (D-3): fail fast on a non-plan_v1 shape ─────────────────
+    if not plan_v1 or plan_v1.get("schema_version") != "plan_v1":
+        return json.dumps({
+            "status": "error",
+            "error": "planner returned non-plan_v1 schema",
+            "raw": str(plan_v1)[:300] if plan_v1 else raw_plan.get("content", "")[:300],
+        }, ensure_ascii=False)
+
+    # ── Actionable gate (D-2 / C-4): surface, never fabricate ────────────────
+    if not _plan_is_actionable(plan_v1):
+        return json.dumps({
+            "status": "needs_user_decision",
+            "needs_user_decision": plan_v1.get("needs_user_decision", []),
+            "goal": plan_v1.get("goal", ""),
+            "message": "Plan is underspecified; answer the questions and re-invoke.",
+        }, ensure_ascii=False)
+
+    # ── Map + render ALL file contents in memory FIRST (atomicity) ───────────
+    km = _map_plan_v1_to_kanban(plan_v1, board_slug, tenant, workspace)
+    warnings.extend(km["warnings"])
+    agents_md = _render_agents_md(km, factcheck)
+    kanban_md = _render_kanban_init_md(km)
+
+    try:
+        from pathlib import Path as _Path
+        import tempfile as _tempfile
+
+        root = _Path(project_path).expanduser()
+        root.mkdir(parents=True, exist_ok=True)
+
+        artifacts = {}
+        for name, content in (("AGENTS.md", agents_md), ("KANBAN.init.md", kanban_md)):
+            target = root / name
+            fd, tmp = _tempfile.mkstemp(dir=str(root), prefix=f".{name}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                os.replace(tmp, str(target))
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            artifacts[name] = str(target)
+    except OSError as exc:
+        _log_json("ERROR", "leo_new_project_write_error", error=str(exc))
+        return json.dumps({
+            "status": "error", "error": f"failed to write artifacts: {exc}",
+        }, ensure_ascii=False)
+
+    _log_json(
+        "INFO", "leo_new_project_done",
+        board=board_slug, tasks=len(km["tasks"]), warnings=len(warnings),
+    )
+    return json.dumps({
+        "status": "success",
+        "project_path": str(root),
+        "artifacts": artifacts,
+        "board_slug": board_slug,
+        "warnings": warnings,
+        "needs_user_decision": [],
+        "goal": km.get("goal", ""),
+        "task_count": len(km["tasks"]),
+    }, ensure_ascii=False)
+
+
 # ── Executor Façade: single-file autonomous lifecycle over ONE UUID ──────────
 # Light local model = EXECUTOR. Leo = BRAIN. One file, one conversation_uuid,
 # one atomic action per turn. Reuses the engine untouched.
@@ -1023,6 +1373,43 @@ def _extract_single_action(planner_content: str) -> Dict[str, Any]:
         return {"action": "error", "error": f"bad JSON: {e}", "raw": m.group(1)[:300]}
 
 
+def _looks_like_pasted_file(prompt: str, filepaths: List[str]) -> Optional[str]:
+    """Detect the read-then-paste anti-pattern in an incoming request.
+
+    Guards the token-economy contract: the caller must pass a path in
+    `filepaths` and let the server inject the file, never paste file contents
+    into `prompt`. Returns an actionable rejection reason when the prompt looks
+    like pasted source, or None when the request is clean.
+
+    Detection is heuristic and deliberately conservative: it fires only on a
+    large prompt that also carries structural code signals, so a genuinely long
+    task description without pasted code is not penalised.
+    """
+    code_signals = (
+        prompt.count("\n") > 40
+        or "```" in prompt
+        or bool(
+            re.search(
+                r"^\s*(def |class |import |from |func |const |public |private )",
+                prompt,
+                re.MULTILINE,
+            )
+        )
+    )
+    if len(prompt) > 3000 and code_signals:
+        return (
+            "This prompt appears to contain pasted file contents. Do NOT read or "
+            "paste files. Put ONLY your task description in `prompt` and pass the "
+            "absolute path in `filepaths`; the server injects the file for you."
+        )
+    if len(prompt) > 5000 and not filepaths:
+        return (
+            "This prompt is very large and no `filepaths` were provided. If it "
+            "contains file content, do NOT paste it: pass the absolute path in "
+            "`filepaths` and keep only the task description in `prompt`."
+        )
+    return None
+
 @mcp.tool()
 async def leo_next_instruction(
     target_file: str,
@@ -1031,6 +1418,12 @@ async def leo_next_instruction(
     last_result: str = "",
 ) -> str:
     """Get the SINGLE next atomic action for the locked target file.
+
+    DO NOT read or open the target file yourself, not before turn 1, not ever.
+    The file is injected ONCE by this server on turn 1. Reading it yourself
+    duplicates it into your context for zero benefit: you are the EXECUTOR, you
+    do not need to see the file to run the returned action. Pass its path as
+    `target_file` and execute what comes back.
 
     You are an EXECUTOR. Do not plan. Call this, perform the ONE returned
     action verbatim, then call again with the raw result. Loop until
@@ -1048,10 +1441,10 @@ async def leo_next_instruction(
 
     if is_first:
         prompt = _build_executor_session_prompt(goal, target_file)
-        files = [target_file]          # inject ONCE
+        files = [target_file]
     else:
         prompt = _build_executor_turn_prompt(last_result)
-        files = []                     # resume UUID; never re-inject
+        files = []
 
     raw = json.loads(await ask_leo_skill(
         skill_name="senior_planner",
@@ -1094,7 +1487,8 @@ async def leo_apply_edit(
 ) -> str:
     """Apply ONE literal find/replace to the locked target file (writes to disk).
 
-    Mechanical, no reasoning. Wraps code_editor (str_replace). Synchronous.
+    Pass the path only; never read or paste the file. Mechanical, no reasoning.
+    Wraps code_editor (str_replace). Synchronous.
     Reuse the SAME conversation_uuid so the edit shares Leo's memory with the
     reasoning turns.
 

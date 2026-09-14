@@ -936,7 +936,7 @@ class BraveLeoPage:
     # Response polling
     # ─────────────────────────────────────────────
 
-    async def wait_for_response(self, timeout_ms: int = 120000) -> str:
+    async def wait_for_response(self, timeout_ms: int = 120000, required_sentinel: Optional[str] = None) -> str:
         """
         Wait for Leo's response using the SQLite DB as the source of truth.
 
@@ -966,6 +966,7 @@ class BraveLeoPage:
                         expected_min_rowid=self._baseline_rowid,
                         timeout=int(timeout_sec),
                         poll_interval=1.0,
+                        required_sentinel=required_sentinel,
                     ),
                 )
 
@@ -980,9 +981,9 @@ class BraveLeoPage:
                     f"❌ DB tracking failed: {e} → falling back to DOM tracking"
                 )
 
-        return await self._wait_for_dom_stabilization(timeout_ms)
+        return await self._wait_for_dom_stabilization(timeout_ms, required_sentinel=required_sentinel)
 
-    async def _wait_for_dom_stabilization(self, timeout_ms: int) -> str:
+    async def _wait_for_dom_stabilization(self, timeout_ms: int, required_sentinel: Optional[str] = None) -> str:
         """
         Fallback DOM reader that pierces the conversation iframe to poll chat
         text while using the unified _is_leo_busy() flag to know when the UI
@@ -1040,8 +1041,13 @@ class BraveLeoPage:
                     stable_count = 0
                     cached_text = current_text
 
-                # Done when UI is released AND text stopped growing (~1.6s)
-                if ui_released and stable_count >= 2:
+                # Check if we have the required sentinel (if any)
+                sentinel_found = True
+                if required_sentinel:
+                    sentinel_found = required_sentinel in current_text
+
+                # Done when UI is released AND text stopped growing (~1.6s) AND sentinel found (if required)
+                if ui_released and stable_count >= 2 and sentinel_found:
                     logger.debug(
                         "✅ UI re-enabled and iframe text stable — done."
                     )

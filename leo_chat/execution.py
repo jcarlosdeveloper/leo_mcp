@@ -19,8 +19,6 @@ from leo_chat.skills.skill_factory import SkillFactory
 from leo_chat.context.prompt_builder import assemble_context
 from leo_chat.pages.brave_leo_page import BraveLeoPage
 from leo_chat.patch_writer import (
-    response_has_terminal_token,
-    strip_terminal_token,
     patch_response_complete,
     edit_response_complete,
     PATCH_END,
@@ -561,7 +559,8 @@ async def execute_leo_flow(
         else:
             logger.debug("   → Mode: Standard (DOM Polling)")
             response_text = await leo_page.wait_for_response(
-                timeout_ms=response_timeout * 1000
+                timeout_ms=response_timeout * 1000,
+                required_sentinel=_structured_sentinel(skill)
             )
             _phase_start("leo_flow_phase", _t0, phase="generation_done_dom",
                          resp_len=len(response_text or ""))
@@ -658,7 +657,7 @@ async def execute_leo_flow(
             def _plan_incomplete(text: str) -> bool:
                 if not text:
                     return True
-                if response_has_terminal_token(text):
+                if TERMINAL_TOKEN in text:
                     return False
                 return True
 
@@ -923,8 +922,11 @@ async def _auto_continue_if_truncated(
                 # doesn't get buried in the middle of the combined text (which
                 # would cause _plan_incomplete to wrongly detect completion).
                 # Remember if it had the token so we can re-append it after stitching.
-                cont_had_token = response_has_terminal_token(cont_stripped)
-                cont_stripped = strip_terminal_token(cont_stripped)
+                # Note: For structured output, we check if token appears anywhere
+                # in the text (contains), not just at the end, to handle cases
+                # where trailing prose follows the token.
+                cont_had_token = TERMINAL_TOKEN in cont_stripped
+                cont_stripped = cont_stripped.replace(TERMINAL_TOKEN, "").strip()
 
                 # Continuation already present means Leo re-sent a finished response.
                 if cont_stripped in response_text:
@@ -956,7 +958,6 @@ async def _auto_continue_if_truncated(
                 f"   ✅ Continuation received: +{len(overlap)} chars "
                 f"(total: {len(response_text)})"
             )
-
         except Exception as e:
             logger.warning(f"Auto-continue failed: {e}")
             break
